@@ -1,0 +1,32 @@
+name: Verify and import UCI source-path fix
+on:
+  push:
+    branches: [bootstrap/uci-import]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Verify reviewed commit
+        run: |
+          base64 --decode .bootstrap/bot.bundle.b64 > /tmp/bot.bundle
+          echo 'e98ce0caea4dd83fde009c37cbe62031e2d94ba31a4f0b07c4e24022cda83639  /tmp/bot.bundle' | sha256sum -c -
+          git fetch /tmp/bot.bundle HEAD:refs/remotes/import/uci
+          test "$(git rev-parse refs/remotes/import/uci)" = ebe47302775819b82567243810cd0983ff40b483
+          git checkout --detach refs/remotes/import/uci
+          git diff --check HEAD^
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Run upstream unit suite
+        run: npm test
+        working-directory: cloudflare-worker
+      - name: Dry-run worker build
+        run: npx --yes wrangler deploy --dry-run
+        working-directory: cloudflare-worker
+      - name: Publish verified author-preserving commit
+        run: git push --force-with-lease=refs/heads/fix/uci-source-path:37cc78e3ed6cb33bd6572767dec1809283d6a637 origin HEAD:refs/heads/fix/uci-source-path
