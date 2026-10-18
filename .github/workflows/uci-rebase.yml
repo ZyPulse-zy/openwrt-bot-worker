@@ -1,0 +1,77 @@
+name: Verify UCI source-identity rebase on current upstream
+on:
+  push:
+    branches: [bootstrap/uci-rebase]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .bootstrap/bot-rebase
+      - name: Verify and import author-preserving source
+        run: |
+          git fetch --depth=1 origin d69e626899c83e8a996afed09e8b51ad111bc34a
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,json,os,subprocess
+          root=Path('.bootstrap/bot-rebase');pins=json.loads((root/'pins.json').read_text())
+          data=base64.b64decode((root/'candidate.bundle.b64').read_text());assert hashlib.sha256(data).hexdigest()==pins['sha256']
+          bundle=Path(os.environ['RUNNER_TEMP'],'candidate.bundle');bundle.write_bytes(data)
+          subprocess.run(['git','bundle','verify',str(bundle)],check=True)
+          subprocess.run(['git','fetch',str(bundle),'HEAD'],check=True)
+          assert subprocess.check_output(['git','rev-parse','FETCH_HEAD'],text=True).strip()==pins['candidate']
+          assert subprocess.check_output(['git','rev-parse','FETCH_HEAD^{tree}'],text=True).strip()==pins['tree']
+          assert subprocess.check_output(['git','show','-s','--format=%an <%ae>','FETCH_HEAD'],text=True).strip()=='Yuen Su <zypulsecore@gmail.com>'
+          assert 'Signed-off-by: Yuen Su <zypulsecore@gmail.com>' in subprocess.check_output(['git','show','-s','--format=%B','FETCH_HEAD'],text=True)
+          subprocess.run(['git','diff','--check',pins['base'],'FETCH_HEAD'],check=True)
+          subprocess.run(['git','push','origin','FETCH_HEAD:refs/heads/candidate/uci-rebase'],check=True)
+          PY
+  upstream-checks:
+    needs: import
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: control
+          sparse-checkout: .bootstrap/bot-rebase
+      - uses: actions/checkout@v7
+        with:
+          path: source
+          ref: candidate/uci-rebase
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Locked upstream dependencies
+        working-directory: source/cloudflare-worker
+        run: |
+          mkdir "$RUNNER_TEMP/bot-evidence"
+          npm ci > "$RUNNER_TEMP/bot-evidence/npm-ci.log" 2>&1
+      - name: Current upstream TypeScript and full test suite
+        working-directory: source/cloudflare-worker
+        run: |
+          npm run typecheck > "$RUNNER_TEMP/bot-evidence/typecheck.log" 2>&1
+          npm test > "$RUNNER_TEMP/bot-evidence/full-tests.log" 2>&1
+          grep -E 'tests 1088|pass 1088|fail 0' "$RUNNER_TEMP/bot-evidence/full-tests.log"
+      - name: Exact upstream counterexample and preserved rename coverage
+        run: |
+          git -C source fetch --depth=1 origin d69e626899c83e8a996afed09e8b51ad111bc34a
+          python3 control/.bootstrap/bot-rebase/verify-baseline.py source "$RUNNER_TEMP/bot-evidence"
+          git -C source diff --exit-code
+          git -C source diff --check d69e626899c83e8a996afed09e8b51ad111bc34a HEAD
+      - name: Upstream Wrangler dry-run only
+        working-directory: source/cloudflare-worker
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: npx --yes wrangler deploy --dry-run > "$RUNNER_TEMP/bot-evidence/wrangler-dry-run.log" 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: uci-rebase-current-upstream-evidence
+          path: ${{ runner.temp }}/bot-evidence
